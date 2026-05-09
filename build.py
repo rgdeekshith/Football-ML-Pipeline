@@ -4,10 +4,10 @@ import sqlite3
 from datetime import datetime
 
 DB_PATH = "football.db"
-RAW_PATH = "raw_games.parquet"  # or "raw_games.csv"
+RAW_PATH = "games.parquet"  # or "games.csv"
 
 def build_database():
-    print("Building football.db from raw_games...")
+    print("Building football.db from games...")
     # Load raw data
     if RAW_PATH.endswith(".parquet"):
         df = pd.read_parquet(RAW_PATH)
