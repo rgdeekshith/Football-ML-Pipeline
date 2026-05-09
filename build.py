@@ -1,66 +1,83 @@
 # build.py
+
 import pandas as pd
 import sqlite3
 from datetime import datetime
 
 DB_PATH = "football.db"
-RAW_PATH = "games.parquet"  # or "games.csv"
+RAW_PATH = "games.parquet"   # raw data file in your repo
+
 
 def build_database():
     print("Building football.db from games...")
+
+    # -----------------------------
     # Load raw data
+    # -----------------------------
     if RAW_PATH.endswith(".parquet"):
         df = pd.read_parquet(RAW_PATH)
     else:
         df = pd.read_csv(RAW_PATH)
 
+    # -----------------------------
     # Open SQLite connection
+    # -----------------------------
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
 
-    # Drop tables if they exist (to rebuild cleanly)
+    # Drop tables if they exist (clean rebuild)
     cur.execute("DROP TABLE IF EXISTS matches;")
     cur.execute("DROP TABLE IF EXISTS teams;")
     cur.execute("DROP TABLE IF EXISTS leagues;")
 
-    # Create tables (simplified schema similar to your pipeline)
-    cur.execute("""
-    CREATE TABLE teams (
-        team_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-        team_name TEXT UNIQUE NOT NULL,
-        country   TEXT,
-        code      TEXT,
-        continent TEXT
-    );
-    """)
+    # -----------------------------
+    # Create tables
+    # -----------------------------
+    cur.execute(
+        """
+        CREATE TABLE teams (
+            team_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_name TEXT UNIQUE NOT NULL,
+            country   TEXT,
+            code      TEXT,
+            continent TEXT
+        );
+        """
+    )
 
-    cur.execute("""
-    CREATE TABLE leagues (
-        league_id   INTEGER PRIMARY KEY AUTOINCREMENT,
-        league_name TEXT UNIQUE NOT NULL,
-        country     TEXT,
-        continent   TEXT,
-        level       TEXT
-    );
-    """)
+    cur.execute(
+        """
+        CREATE TABLE leagues (
+            league_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+            league_name TEXT UNIQUE NOT NULL,
+            country     TEXT,
+            continent   TEXT,
+            level       TEXT
+        );
+        """
+    )
 
-    cur.execute("""
-    CREATE TABLE matches (
-        match_id    INTEGER PRIMARY KEY AUTOINCREMENT,
-        home_team_id INTEGER NOT NULL,
-        away_team_id INTEGER NOT NULL,
-        league_id    INTEGER NOT NULL,
-        match_date   TEXT NOT NULL,
-        full_time    TEXT,
-        home_score   INTEGER NOT NULL,
-        away_score   INTEGER NOT NULL,
-        result_class TEXT NOT NULL
-    );
-    """)
+    cur.execute(
+        """
+        CREATE TABLE matches (
+            match_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            home_team_id INTEGER NOT NULL,
+            away_team_id INTEGER NOT NULL,
+            league_id    INTEGER NOT NULL,
+            match_date   TEXT NOT NULL,
+            full_time    TEXT,
+            home_score   INTEGER NOT NULL,
+            away_score   INTEGER NOT NULL,
+            result_class TEXT NOT NULL
+        );
+        """
+    )
 
     conn.commit()
 
-    # ---------- Build teams ----------
+    # -----------------------------
+    # Build teams
+    # -----------------------------
     home_teams = df[["home", "home_country", "home_code", "home_continent"]].copy()
     home_teams.columns = ["team_name", "country", "code", "continent"]
 
@@ -68,29 +85,53 @@ def build_database():
     away_teams.columns = ["team_name", "country", "code", "continent"]
 
     teams_df = pd.concat([home_teams, away_teams], ignore_index=True)
+
+    # Drop rows with missing team_name
     teams_df = teams_df.dropna(subset=["team_name"])
     teams_df["team_name"] = teams_df["team_name"].astype(str).str.strip()
+    teams_df["country"] = teams_df["country"].astype(str).str.strip()
+    teams_df["code"] = teams_df["code"].astype(str).str.strip()
+    teams_df["continent"] = teams_df["continent"].astype(str).str.strip()
+
     teams_df = teams_df.drop_duplicates(subset=["team_name"]).reset_index(drop=True)
 
     teams_df.to_sql("teams", conn, if_exists="append", index=False)
 
-    # Create mapping team_name -> team_id
     teams_db = pd.read_sql("SELECT team_id, team_name FROM teams;", conn)
     team_name_to_id = dict(zip(teams_db["team_name"], teams_db["team_id"]))
 
-    # ---------- Build leagues ----------
-    leagues_df = pd.DataFrame({
-        "league_name": df["competition"].astype(str).str.strip(),
-        "country": df["competition"].astype(str).str.strip(),
-        "continent": df["continent"].astype(str).str.strip(),
-        "level": df["level"].astype(str).str.strip(),
-    }).drop_duplicates(subset=["league_name"]).reset_index(drop=True)
+    # -----------------------------
+    # Build leagues
+    # -----------------------------
+    leagues_df = pd.DataFrame(
+        {
+            "league_name": df["competition"],
+            "country": df["competition"],
+            "continent": df["continent"],
+            "level": df["level"],
+        }
+    )
+
+    # Drop rows where league_name is missing to satisfy NOT NULL constraint
+    leagues_df = leagues_df.dropna(subset=["league_name"])
+
+    # Clean strings
+    leagues_df["league_name"] = leagues_df["league_name"].astype(str).str.strip()
+    leagues_df["country"] = leagues_df["country"].astype(str).str.strip()
+    leagues_df["continent"] = leagues_df["continent"].astype(str).str.strip()
+    leagues_df["level"] = leagues_df["level"].astype(str).str.strip()
+
+    # Remove duplicate league names
+    leagues_df = leagues_df.drop_duplicates(subset=["league_name"]).reset_index(drop=True)
 
     leagues_df.to_sql("leagues", conn, if_exists="append", index=False)
+
     leagues_db = pd.read_sql("SELECT league_id, league_name FROM leagues;", conn)
     league_name_to_id = dict(zip(leagues_db["league_name"], leagues_db["league_id"]))
 
-    # ---------- Build matches ----------
+    # -----------------------------
+    # Build matches
+    # -----------------------------
     matches_to_insert = []
 
     for row in df.itertuples(index=False):
@@ -104,7 +145,7 @@ def build_database():
         away_score = int(getattr(row, "ga") if pd.notna(getattr(row, "ga")) else 0)
         full_time = getattr(row, "full_time")
 
-        # Filter if mapping missing
+        # Skip rows where mapping does not exist
         if home_team_name not in team_name_to_id or away_team_name not in team_name_to_id:
             continue
         if league_name not in league_name_to_id:
@@ -114,7 +155,7 @@ def build_database():
         away_id = team_name_to_id[away_team_name]
         league_id = league_name_to_id[league_name]
 
-        # Handle date
+        # Parse date
         try:
             match_date = pd.to_datetime(date_value).date().isoformat()
         except Exception:
@@ -158,4 +199,5 @@ def build_database():
     )
     conn.commit()
     conn.close()
-    print(f"Inserted {len(matches_to_insert)} matches.")
+
+    print(f"Inserted {len(matches_to_insert)} matches and built football.db.")
