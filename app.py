@@ -3,14 +3,19 @@
 # -----------------------------
 # Imports
 # -----------------------------
+import os
 import sqlite3                       # For connecting to football.db
 import pandas as pd                  # For data manipulation
 import streamlit as st               # Streamlit web framework
+
+from build_db import build_database   # Function that builds football.db from raw data
 
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.pipeline import Pipeline
+
+DB_PATH = "football.db"
 
 # -----------------------------
 # Basic page config (title, icon, layout)
@@ -24,24 +29,23 @@ st.set_page_config(
 # -----------------------------
 # Database helper
 # -----------------------------
+def ensure_db():
+    if not os.path.exists(DB_PATH):
+        build_database()
+
 @st.cache_data(show_spinner=False)
-def get_connection(db_path="football.db"):
-    """
-    Open a connection to the SQLite database.
-    Cached so repeated calls do not reopen constantly.
-    """
+def get_connection(db_path=DB_PATH):
+    ensure_db()
     conn = sqlite3.connect(db_path)
     return conn
 
 @st.cache_data(show_spinner=False)
 def load_matches_df():
     """
-    Load matches with teams and leagues, plus win rates,
-    similar to your training query in football_ml_pipeline.py.
+    Load matches with teams and leagues, plus win rates.
     """
     conn = get_connection()
 
-    # Core matches + team + league info
     query = """
     SELECT
         m.match_id,
@@ -60,23 +64,20 @@ def load_matches_df():
     """
     matches_df = pd.read_sql(query, conn)
 
-    # Compute simple win stats per team (same logic as in pipeline file)
+    # Compute simple win stats per team
     team_stats = {}
     for row in matches_df.itertuples(index=False):
         home = row.home_team
         away = row.away_team
         result = row.result_class
 
-        # Ensure dict entries
         for team in [home, away]:
             if team not in team_stats:
                 team_stats[team] = {"games": 0, "wins": 0}
 
-        # Count games
         team_stats[home]["games"] += 1
         team_stats[away]["games"] += 1
 
-        # Count wins
         if result == "home":
             team_stats[home]["wins"] += 1
         elif result == "away":
@@ -114,7 +115,6 @@ def load_matches_df():
 def train_gb_pipeline():
     """
     Train the Gradient Boosting pipeline on matches_df.
-    This is cached as a resource so it's trained only once per session.
     """
     matches_df = load_matches_df()
 
@@ -131,7 +131,6 @@ def train_gb_pipeline():
     X = matches_df[feature_cols]
     y = matches_df[target_col]
 
-    # Split (simple; in app we don't need validation metrics every time)
     from sklearn.model_selection import train_test_split
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
@@ -166,7 +165,6 @@ def train_gb_pipeline():
 
     model.fit(X_train, y_train)
 
-    # Simple validation accuracy for info
     from sklearn.metrics import accuracy_score
     y_val_pred = model.predict(X_val)
     val_acc = accuracy_score(y_val, y_val_pred)
@@ -177,18 +175,10 @@ def train_gb_pipeline():
 # Utility: expected goals (simple approximation)
 # -----------------------------
 def estimate_expected_goals(row):
-    """
-    Simple heuristic: convert win rates into approximate expected goals.
-    This is NOT a true xG model, just a placeholder.
-    """
-    # Clip win rates to avoid extremes
     home_wr = max(0.0, min(1.0, row["home_win_rate"]))
     away_wr = max(0.0, min(1.0, row["away_win_rate"]))
-
-    # Scale into 0.5–2.5 goals range
     home_xg = 0.5 + 2.0 * home_wr
     away_xg = 0.5 + 2.0 * away_wr
-
     return home_xg, away_xg
 
 # -----------------------------
@@ -196,7 +186,6 @@ def estimate_expected_goals(row):
 # -----------------------------
 model, val_acc, matches_df = train_gb_pipeline()
 
-# Get unique lists for selectors
 all_teams = sorted(set(matches_df["home_team"]).union(set(matches_df["away_team"])))
 all_leagues = sorted(matches_df["league_name"].unique())
 all_levels = sorted(matches_df["level"].unique())
@@ -236,10 +225,12 @@ with tab1:
         fav_country = st.selectbox(
             "Your favourite country",
             options=sorted(
-                [t for t in all_teams if t in ["France", "Spain", "Argentina", "England",
-                                               "Portugal", "Brazil", "Netherlands",
-                                               "Germany", "Italy", "Belgium",
-                                               "Croatia", "USA", "Mexico"]]
+                [t for t in all_teams if t in [
+                    "France", "Spain", "Argentina", "England",
+                    "Portugal", "Brazil", "Netherlands",
+                    "Germany", "Italy", "Belgium",
+                    "Croatia", "USA", "Mexico"
+                ]]
             ),
             help="Pick a national team you support."
         )
@@ -259,7 +250,6 @@ with tab2:
         "and estimated goals using the trained Gradient Boosting model."
     )
 
-    # Selection controls
     with st.container():
         col_left, col_right = st.columns(2)
 
@@ -295,15 +285,12 @@ with tab2:
                 key="away_team_select"
             )
 
-        # Option to swap home and away
         if st.button("Swap home/away teams"):
             home_team, away_team = away_team, home_team
 
-    # Compute win rates for selected teams from matches_df
     st.markdown("---")
     st.write("Using historical data from the database to compute win rates for the selected teams.")
 
-    # Filter matches for each team (across all leagues for now)
     home_hist = matches_df[
         (matches_df["home_team"] == home_team) | (matches_df["away_team"] == home_team)
     ]
@@ -329,7 +316,6 @@ with tab2:
     st.write(f"Estimated historical win rate for **{home_team}**: `{home_wr:.3f}`")
     st.write(f"Estimated historical win rate for **{away_team}**: `{away_wr:.3f}`")
 
-    # Build one-row DataFrame for model input
     input_df = pd.DataFrame(
         {
             "home_team": [home_team],
@@ -342,11 +328,9 @@ with tab2:
     )
 
     if st.button("Predict match outcome"):
-        # Get class probabilities from the pipeline
         probs = model.predict_proba(input_df)[0]
         classes = model.classes_
 
-        # Organise into DataFrame for display
         prob_df = pd.DataFrame(
             {
                 "Outcome": classes,
@@ -357,13 +341,11 @@ with tab2:
         st.subheader("Predicted outcome probabilities")
         st.dataframe(prob_df.style.format({"Probability": "{:.3f}"}), use_container_width=True)
 
-        # Simple bar chart
         st.bar_chart(
             data=prob_df.set_index("Outcome"),
             height=300
         )
 
-        # Expected goals (simple heuristic)
         home_xg, away_xg = estimate_expected_goals(
             {
                 "home_win_rate": home_wr,
@@ -395,9 +377,6 @@ with tab3:
         "This uses only football data (matches, teams, leagues) and not the ML model outputs."
     )
 
-    # Split into club vs country by simple heuristic:
-    # leagues where league_name looks like club competitions vs national team games
-    # For now, use presence of space and absence of some known country names as a proxy.
     all_countries = [
         "France", "Spain", "Argentina", "England", "Portugal", "Brazil",
         "Netherlands", "Germany", "Italy", "Belgium", "Croatia",
@@ -405,7 +384,6 @@ with tab3:
         "Iran", "Turkey", "Ecuador", "Austria", "South Korea"
     ]
 
-    # Club EDA
     st.markdown("### Clubs section")
 
     club_team = st.selectbox(
@@ -423,7 +401,6 @@ with tab3:
     else:
         st.write(f"Total matches found for **{club_team}**: {len(club_matches)}")
 
-        # Basic stats
         wins = draws = losses = 0
         goals_for = goals_against = 0
 
@@ -437,7 +414,7 @@ with tab3:
                     losses += 1
                 else:
                     draws += 1
-            else:  # away team
+            else:
                 goals_for += row.away_score
                 goals_against += row.home_score
                 if row.result_class == "away":
