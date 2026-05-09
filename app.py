@@ -8,7 +8,7 @@ import sqlite3                       # For connecting to football.db
 import pandas as pd                  # For data manipulation
 import streamlit as st               # Streamlit web framework
 
-from build_db import build_database   # Function that builds football.db from raw data
+from build import build_database   # Function that builds football.db from raw data
 
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
